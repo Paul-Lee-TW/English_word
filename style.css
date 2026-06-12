@@ -94,6 +94,17 @@ body {
 .big-btn.blue { background: var(--primary); }
 .big-btn.gray { background: #aeb4c8; }
 
+/* ---- learn level picker ---- */
+.lv-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin: 12px 0; }
+.lv-btn {
+  padding: 14px 10px; border: 2px solid #e3e7f2; border-radius: 14px;
+  background: var(--card); color: var(--text);
+  font-size: 16px; font-weight: 700; text-align: center;
+}
+.lv-btn .cnt { display: block; font-size: 12px; font-weight: 400; color: var(--muted); margin-top: 4px; }
+.lv-btn.done { opacity: .45; }
+.lv-btn:active { transform: scale(.97); border-color: var(--primary); }
+
 /* ---- quiz ---- */
 .quiz-q {
   background: var(--card); border-radius: 20px; padding: 26px 18px;

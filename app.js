@@ -18,11 +18,13 @@ function loadState() {
     if (s && s.cards) {
       s.custom = s.custom || {};
       s.nextCustomId = s.nextCustomId || 1;
+      s.learnOrder = s.learnOrder || 'seq';
+      s.learnLevel = s.learnLevel || 0;
       return s;
     }
   } catch (e) { /* fall through */ }
   return { cards: {}, custom: {}, nextCustomId: 1, streak: 0, lastDay: 0,
-           newPerSession: 10, learnedToday: 0, todayDay: 0 };
+           newPerSession: 10, learnedToday: 0, todayDay: 0, learnOrder: 'seq', learnLevel: 0 };
 }
 function saveState() { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
 
@@ -63,14 +65,6 @@ function dueKeys() {
   return Object.keys(state.cards)
     .map(normKey)
     .filter(k => wordOf(k) && state.cards[k][0] < MASTER_BOX && state.cards[k][1] <= today);
-}
-function newIndices(limit) {
-  const out = [];
-  const end = Math.min(WORDS.length, PHRASE_START);
-  for (let i = 0; i < end && out.length < limit; i++) {
-    if (!state.cards[i]) out.push(i);
-  }
-  return out;
 }
 function newPhraseIndices(limit) {
   const out = [];
@@ -197,7 +191,7 @@ function showHome() {
       </div>
     </div>
     <button class="menu-btn" data-act="learn">
-      <span>📖 新しい単語<span class="sub">頻度順に ${state.newPerSession} 語ずつ学ぶ</span></span>
+      <span>📖 新しい単語<span class="sub">レベルを選んで ${state.newPerSession} 語ずつ学ぶ</span></span>
     </button>
     <button class="menu-btn" data-act="phrases">
       <span>📗 熟語・連語<span class="sub">get up, be good at など 中学の重要熟語</span></span>
@@ -224,17 +218,61 @@ function showHome() {
   };
 }
 
-/* ---- learn: flashcards for new words ---- */
+/* ---- learn: pick a level, then flashcards for new words ---- */
 function startLearn() {
-  startLearnQueue(newIndices(state.newPerSession), '新しい単語',
-    () => showResult('🎉', '全部の単語を学習済みです！', 'すごい！復習を続けましょう。'));
+  const wordEnd = Math.min(WORDS.length, PHRASE_START);
+  const remain = lv => {
+    const lo = lv ? (lv - 1) * LEVEL_SIZE : 0;
+    const hi = lv ? Math.min(lv * LEVEL_SIZE, wordEnd) : wordEnd;
+    let n = 0;
+    for (let i = lo; i < hi; i++) if (!state.cards[i]) n++;
+    return n;
+  };
+  const order = state.learnOrder;
+  $app().innerHTML = `
+    <div class="panel">
+      <h3>📖 どこから学ぶ？</h3>
+      <div class="level-tabs">
+        <button class="level-tab ${order === 'seq' ? 'active' : ''}" data-order="seq">順番どおり</button>
+        <button class="level-tab ${order === 'random' ? 'active' : ''}" data-order="random">ランダム</button>
+      </div>
+      <div class="lv-grid">
+        ${[0, 1, 2, 3, 4, 5, 6].map(lv => `
+          <button class="lv-btn ${remain(lv) ? '' : 'done'}" data-lv="${lv}">
+            ${lv ? `レベル${lv}` : '全レベル'}
+            <span class="cnt">残り ${remain(lv)}</span>
+          </button>`).join('')}
+      </div>
+      <p class="note">レベル＝頻度順 500 語ずつ（レベル1がいちばんよく使う単語）。「ランダム」を選ぶと選んだ範囲から無作為に出題されます。</p>
+    </div>`;
+  $app().onclick = e => {
+    const ob = e.target.closest('[data-order]');
+    if (ob) { state.learnOrder = ob.dataset.order; saveState(); startLearn(); return; }
+    const lb = e.target.closest('[data-lv]');
+    if (lb) beginLearnSession(Number(lb.dataset.lv));
+  };
+}
+function beginLearnSession(lv) {
+  state.learnLevel = lv;
+  saveState();
+  const wordEnd = Math.min(WORDS.length, PHRASE_START);
+  const lo = lv ? (lv - 1) * LEVEL_SIZE : 0;
+  const hi = lv ? Math.min(lv * LEVEL_SIZE, wordEnd) : wordEnd;
+  const pool = [];
+  for (let i = lo; i < hi; i++) if (!state.cards[i]) pool.push(i);
+  if (state.learnOrder === 'random') shuffle(pool);
+  startLearnQueue(pool.slice(0, state.newPerSession),
+    lv ? `新しい単語 Lv${lv}` : '新しい単語',
+    () => showResult('🎉', 'このレベルは学習済みです！', '別のレベルか復習を続けましょう。'));
 }
 function startLearnCustom() {
   startLearnQueue(newCustomKeys(), 'マイ単語',
     () => showResult('📕', '未学習のマイ単語はありません', '単語を追加するか、復習を続けましょう。'));
 }
 function startLearnPhrases() {
-  startLearnQueue(newPhraseIndices(state.newPerSession), '熟語・連語',
+  const pool = newPhraseIndices(Infinity);
+  if (state.learnOrder === 'random') shuffle(pool);
+  startLearnQueue(pool.slice(0, state.newPerSession), '熟語・連語',
     () => showResult('🎉', '全部の熟語を学習済みです！', 'すごい！復習で定着させましょう。'));
 }
 function startLearnQueue(queue, label, onEmpty) {
