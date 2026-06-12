@@ -293,12 +293,26 @@ function startLearnQueue(queue, label, onEmpty) {
         <div class="word">${esc(w.w)}</div>
         <button class="speak-btn" data-act="speak">🔊</button>
         ${flipped ? meaningHtml(w.ja, expanded) : '<div class="hint">タップして意味を表示</div>'}
+        <div class="swipe-tag tag-know">もう知ってる</div>
+        <div class="swipe-tag tag-learned">学習した</div>
       </div>
       ${flipped ? `
         <div class="btn-row">
           <button class="big-btn green" data-act="know">もう知ってる</button>
           <button class="big-btn blue" data-act="learned">学習した</button>
-        </div>` : ''}`;
+        </div>` : ''}
+      <p class="swipe-hint">スワイプでもOK　← もう知ってる｜学習した →</p>`;
+    function finish(act) {
+      const box = act === 'know' ? 4 : 1;
+      setCard(i, box, dayNum() + INTERVALS[box]);
+      touchStreak();
+      todayCount();
+      state.learnedToday++;
+      saveState();
+      pos++;
+      if (pos < queue.length) render(false, false);
+      else showResult('✅', `${queue.length} 語を学習しました`, '明日の復習テストで定着させよう！');
+    }
     $app().onclick = e => {
       const t = e.target.closest('[data-act]');
       if (!t) return;
@@ -306,19 +320,57 @@ function startLearnQueue(queue, label, onEmpty) {
       if (act === 'speak') { speak(w.w); return; }
       if (act === 'flip') { speak(w.w); render(true, false); return; }
       if (act === 'more') { render(true, true); return; }
-      if (act === 'know' || act === 'learned') {
-        const box = act === 'know' ? 4 : 1;
-        setCard(i, box, dayNum() + INTERVALS[box]);
-        touchStreak();
-        todayCount();
-        state.learnedToday++;
-        saveState();
-        pos++;
-        if (pos < queue.length) render(false, false);
-        else showResult('✅', `${queue.length} 語を学習しました`, '明日の復習テストで定着させよう！');
-      }
+      if (act === 'know' || act === 'learned') finish(act);
     };
+    attachSwipe(document.querySelector('.flashcard'),
+      () => finish('know'), () => finish('learned'));
     if (!flipped) speak(w.w);
+  }
+}
+
+// swipe left -> onLeft, swipe right -> onRight; vertical moves keep scrolling
+function attachSwipe(card, onLeft, onRight) {
+  if (!card) return;
+  let x0 = 0, y0 = 0, dragging = false, horizontal = false, done = false;
+  card.addEventListener('touchstart', e => {
+    const t = e.touches[0];
+    x0 = t.clientX; y0 = t.clientY;
+    dragging = true; horizontal = false;
+    card.style.transition = 'none';
+  }, { passive: true });
+  card.addEventListener('touchmove', e => {
+    if (!dragging || done) return;
+    const t = e.touches[0];
+    const dx = t.clientX - x0, dy = t.clientY - y0;
+    if (!horizontal && Math.abs(dx) < 12) return;
+    if (!horizontal && Math.abs(dy) > Math.abs(dx)) { dragging = false; return; }
+    horizontal = true;
+    card.style.transform = `translateX(${dx}px) rotate(${dx / 24}deg)`;
+    card.classList.toggle('swiping-left', dx < -50);
+    card.classList.toggle('swiping-right', dx > 50);
+  }, { passive: true });
+  card.addEventListener('touchend', e => {
+    if (!dragging || done) return;
+    dragging = false;
+    const dx = e.changedTouches[0].clientX - x0;
+    if (horizontal && dx < -90) fly(-1, onLeft);
+    else if (horizontal && dx > 90) fly(1, onRight);
+    else {
+      card.style.transition = 'transform .18s';
+      card.style.transform = '';
+      card.classList.remove('swiping-left', 'swiping-right');
+    }
+  });
+  // a real swipe must not fire the tap actions underneath the finger
+  card.addEventListener('click', e => {
+    if (horizontal) { e.stopPropagation(); e.preventDefault(); }
+  }, true);
+  function fly(dir, cb) {
+    done = true;
+    card.style.transition = 'transform .22s ease-out, opacity .22s';
+    card.style.transform = `translateX(${dir * 120}%) rotate(${dir * 14}deg)`;
+    card.style.opacity = '0';
+    setTimeout(cb, 200);
   }
 }
 

@@ -72,7 +72,18 @@ body {
   display: flex; flex-direction: column; align-items: center; justify-content: center;
   box-shadow: 0 4px 18px rgba(40,50,90,.08);
   text-align: center; margin-bottom: 16px;
+  position: relative; touch-action: pan-y; will-change: transform;
 }
+.swipe-tag {
+  position: absolute; top: 18px; padding: 6px 14px;
+  border-radius: 10px; font-size: 15px; font-weight: 800; color: #fff;
+  opacity: 0; transition: opacity .12s; pointer-events: none;
+}
+.tag-know { left: 14px; background: var(--green); transform: rotate(-8deg); }
+.tag-learned { right: 14px; background: var(--primary); transform: rotate(8deg); }
+.swiping-left .tag-know { opacity: 1; }
+.swiping-right .tag-learned { opacity: 1; }
+.swipe-hint { text-align: center; font-size: 12px; color: var(--muted); margin: 10px 0 0; }
 .flashcard .word { font-size: 40px; font-weight: 800; letter-spacing: .5px; word-break: break-all; }
 .flashcard .rank { font-size: 12px; color: var(--muted); margin-bottom: 8px; }
 .flashcard .hint { color: var(--muted); font-size: 13.5px; margin-top: 22px; }
