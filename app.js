@@ -7,7 +7,8 @@ const LEVEL_SIZE = 500;               // 6 levels x 500 words
 const INTERVALS = [0, 1, 2, 4, 7, 15, 30]; // days until next review, by box
 const MASTER_BOX = 6;
 
-let WORDS = [];                       // [{w, ja}] frequency order
+let WORDS = [];                       // [{w, ja}] words in frequency order, then built-in phrases
+let PHRASE_START = Infinity;          // index of first built-in phrase in WORDS
 let DICT = null;                      // lazy-loaded lookup dict for custom words
 let state = loadState();
 
@@ -65,7 +66,15 @@ function dueKeys() {
 }
 function newIndices(limit) {
   const out = [];
-  for (let i = 0; i < WORDS.length && out.length < limit; i++) {
+  const end = Math.min(WORDS.length, PHRASE_START);
+  for (let i = 0; i < end && out.length < limit; i++) {
+    if (!state.cards[i]) out.push(i);
+  }
+  return out;
+}
+function newPhraseIndices(limit) {
+  const out = [];
+  for (let i = PHRASE_START; i < WORDS.length && out.length < limit; i++) {
     if (!state.cards[i]) out.push(i);
   }
   return out;
@@ -73,6 +82,7 @@ function newIndices(limit) {
 function newCustomKeys() {
   return Object.keys(state.custom).filter(k => !state.cards[k]);
 }
+function isPhraseKey(k) { return typeof k === 'number' && k >= PHRASE_START; }
 function counts() {
   let master = 0, learning = 0, cMaster = 0, cLearning = 0;
   for (const k in state.cards) {
@@ -136,7 +146,8 @@ function shortJa(ja) {
 function speak(word) {
   if (!('speechSynthesis' in window)) return;
   speechSynthesis.cancel();
-  const u = new SpeechSynthesisUtterance(word);
+  // strip placeholder marks used in phrase entries ("too ... to ~" etc.)
+  const u = new SpeechSynthesisUtterance(word.replace(/\.{3}|[~…]/g, ' ').replace(/\s+/g, ' ').trim());
   u.lang = 'en-US';
   u.rate = 0.9;
   const v = speechSynthesis.getVoices().find(v => v.lang.startsWith('en'));
@@ -166,6 +177,8 @@ function showHome() {
   const c = counts();
   const due = dueKeys().length;
   const customTotal = Object.keys(state.custom).length;
+  let phraseNew = 0;
+  for (let i = PHRASE_START; i < WORDS.length; i++) if (!state.cards[i]) phraseNew++;
   const pctM = (c.master / WORDS.length * 100).toFixed(1);
   const pctL = (c.learning / WORDS.length * 100).toFixed(1);
   const today = todayCount();
@@ -186,6 +199,10 @@ function showHome() {
     <button class="menu-btn" data-act="learn">
       <span>📖 新しい単語<span class="sub">頻度順に ${state.newPerSession} 語ずつ学ぶ</span></span>
     </button>
+    <button class="menu-btn" data-act="phrases">
+      <span>📗 熟語・連語<span class="sub">get up, be good at など 中学の重要熟語</span></span>
+      <span class="badge ${phraseNew ? '' : 'zero'}">${phraseNew}</span>
+    </button>
     <button class="menu-btn" data-act="review">
       <span>🔁 復習テスト<span class="sub">期限が来た単語を4択でチェック</span></span>
       <span class="badge ${due ? '' : 'zero'}">${due}</span>
@@ -197,13 +214,13 @@ function showHome() {
       <span>📕 マイ単語<span class="sub">教科書の単語を自分で追加（${customTotal} 語）</span></span>
     </button>
     <button class="menu-btn" data-act="list">
-      <span>📋 単語リスト<span class="sub">3000語を検索・レベル別に確認</span></span>
+      <span>📋 単語リスト<span class="sub">3000語＋熟語を検索・レベル別に確認</span></span>
     </button>`;
   $app().onclick = e => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
-    ({ learn: startLearn, review: startReview, spell: startSpell,
-       mywords: showMyWords, list: showList })[btn.dataset.act]();
+    ({ learn: startLearn, phrases: startLearnPhrases, review: startReview,
+       spell: startSpell, mywords: showMyWords, list: showList })[btn.dataset.act]();
   };
 }
 
@@ -216,6 +233,10 @@ function startLearnCustom() {
   startLearnQueue(newCustomKeys(), 'マイ単語',
     () => showResult('📕', '未学習のマイ単語はありません', '単語を追加するか、復習を続けましょう。'));
 }
+function startLearnPhrases() {
+  startLearnQueue(newPhraseIndices(state.newPerSession), '熟語・連語',
+    () => showResult('🎉', '全部の熟語を学習済みです！', 'すごい！復習で定着させましょう。'));
+}
 function startLearnQueue(queue, label, onEmpty) {
   if (!queue.length) return onEmpty();
   let pos = 0;
@@ -224,7 +245,9 @@ function startLearnQueue(queue, label, onEmpty) {
   function render(flipped, expanded) {
     const i = queue[pos];
     const w = wordOf(i);
-    const rankLine = isCustomKey(i) ? '📕 マイ単語' : `#${i + 1}　レベル${Math.floor(i / LEVEL_SIZE) + 1}`;
+    const rankLine = isCustomKey(i) ? '📕 マイ単語'
+      : isPhraseKey(i) ? `📗 熟語 ${i - PHRASE_START + 1} / ${WORDS.length - PHRASE_START}`
+      : `#${i + 1}　レベル${Math.floor(i / LEVEL_SIZE) + 1}`;
     $app().innerHTML = `
       <div class="session-head"><span>${label}</span><span>${pos + 1} / ${queue.length}</span></div>
       <div class="flashcard" data-act="${flipped ? '' : 'flip'}">
@@ -272,13 +295,20 @@ function startReview() {
     const w = wordOf(key);
     const texts = new Set([shortJa(w.ja)]);
     const out = [{ txt: shortJa(w.ja), ok: true }];
-    // distractors from nearby frequency ranks feel fairer than random ones
-    const span = Math.min(WORDS.length, 600);
-    const center = isCustomKey(key) ? Math.floor(Math.random() * WORDS.length) : key;
-    const base = Math.max(0, Math.min(WORDS.length - span, center - span / 2));
+    // phrases get phrase distractors; words get distractors from nearby
+    // frequency ranks, which feel fairer than fully random ones
+    let lo, hi;
+    if (isPhraseKey(key)) {
+      lo = PHRASE_START; hi = WORDS.length;
+    } else {
+      const span = Math.min(PHRASE_START, WORDS.length, 600);
+      const center = isCustomKey(key) ? Math.floor(Math.random() * span) : key;
+      lo = Math.max(0, Math.min(Math.min(PHRASE_START, WORDS.length) - span, center - span / 2));
+      hi = lo + span;
+    }
     let guard = 0;
     while (out.length < 4 && guard++ < 200) {
-      const j = base + Math.floor(Math.random() * span);
+      const j = lo + Math.floor(Math.random() * (hi - lo));
       const txt = shortJa(WORDS[j].ja);
       if (WORDS[j].w === w.w || texts.has(txt)) continue;
       texts.add(txt);
@@ -326,7 +356,9 @@ function startReview() {
 
 /* ---- spelling: ja + audio -> type the word ---- */
 function startSpell() {
-  const pool = Object.keys(state.cards).map(normKey).filter(k => wordOf(k));
+  // phrases and multi-word entries are awkward to type — single words only
+  const pool = Object.keys(state.cards).map(normKey)
+    .filter(k => wordOf(k) && !wordOf(k).w.includes(' '));
   if (pool.length < 4) return showResult('📖', 'まず単語を学習しよう', 'スペル練習は学習済みの単語から出題されます。');
   const queue = shuffle(pool).slice(0, 10);
   let pos = 0, correct = 0;
@@ -441,7 +473,7 @@ vacuum cleaner,掃除機"></textarea>
     const r = addWord(w, ja);
     saveState();
     if (r === 'added') showMyWords(`「${w.trim().toLowerCase()}」を追加しました`);
-    else if (r === 'queued') showMyWords(`「${w.trim().toLowerCase()}」は3000語リストにあります。今日の復習に追加しました`);
+    else if (r === 'queued') showMyWords(`「${w.trim().toLowerCase()}」は内蔵リスト（3000語・熟語）にあります。今日の復習に追加しました`);
     else if (r === 'noja') say('辞書に見つかりません。意味を入力してから追加してください', false);
     else say('すでに追加されています', false);
   };
@@ -462,7 +494,7 @@ vacuum cleaner,掃除機"></textarea>
     }
     saveState();
     let text = `追加 ${added} 語`;
-    if (queued) text += `／3000語リストから今日の復習へ ${queued} 語`;
+    if (queued) text += `／内蔵リストから今日の復習へ ${queued} 語`;
     if (failed.length) text += `／意味が見つからず追加できず: ${failed.join(', ')}（意味を付けて再入力してください）`;
     showMyWords(text);
   };
@@ -493,9 +525,10 @@ function showList() {
   let limit = 50;
   render();
 
+  function levelOf(i) { return i >= PHRASE_START ? 7 : Math.floor(i / LEVEL_SIZE) + 1; }
   function rows() {
     let idx = [...WORDS.keys()];
-    if (level) idx = idx.filter(i => Math.floor(i / LEVEL_SIZE) + 1 === level);
+    if (level) idx = idx.filter(i => levelOf(i) === level);
     if (query) idx = idx.filter(i => WORDS[i].w.includes(query) || WORDS[i].ja.includes(query));
     return idx;
   }
@@ -506,7 +539,7 @@ function showList() {
   }
   function render() {
     const idx = rows();
-    const tabs = ['全部', 'Lv1', 'Lv2', 'Lv3', 'Lv4', 'Lv5', 'Lv6'];
+    const tabs = ['全部', 'Lv1', 'Lv2', 'Lv3', 'Lv4', 'Lv5', 'Lv6', '熟語'];
     $app().innerHTML = `
       <input class="search-box" type="search" placeholder="🔍 単語・意味で検索" value="${esc(query)}">
       <div class="level-tabs">${tabs.map((t, n) =>
@@ -596,12 +629,18 @@ document.getElementById('btn-home').onclick = showHome;
 document.getElementById('btn-settings').onclick = showSettings;
 if ('speechSynthesis' in window) speechSynthesis.getVoices(); // warm up voice list
 
-fetch('data/words.json')
-  .then(r => {
+Promise.all([
+  fetch('data/words.json').then(r => {
     if (!r.ok) throw new Error(r.status);
     return r.json();
+  }),
+  fetch('data/phrases.json').then(r => r.ok ? r.json() : []),
+])
+  .then(([words, phrases]) => {
+    PHRASE_START = words.length;
+    WORDS = words.concat(phrases);
+    showHome();
   })
-  .then(data => { WORDS = data; showHome(); })
   .catch(err => {
     $app().innerHTML = `<div class="loading">単語データを読み込めませんでした (${esc(String(err))})。<br>
       ローカルで開く場合は <code>python3 -m http.server</code> などのサーバー経由で開いてください。</div>`;
