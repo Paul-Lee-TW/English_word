@@ -141,6 +141,10 @@ body {
 .word-row .w { font-weight: 700; font-size: 16.5px; flex-shrink: 0; }
 .word-row .ja { font-size: 13px; color: var(--muted); flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .word-row .st { font-size: 14px; flex-shrink: 0; }
+.word-row .del-btn {
+  background: #f2f4fa; color: var(--muted);
+  width: 34px; height: 34px; font-size: 15px; flex-shrink: 0;
+}
 .list-more { width: 100%; padding: 14px; border: none; border-radius: 12px; background: #e3e7f2; font-size: 15px; font-weight: 600; }
 
 /* ---- settings ---- */

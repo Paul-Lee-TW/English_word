@@ -8,14 +8,20 @@ const INTERVALS = [0, 1, 2, 4, 7, 15, 30]; // days until next review, by box
 const MASTER_BOX = 6;
 
 let WORDS = [];                       // [{w, ja}] frequency order
+let DICT = null;                      // lazy-loaded lookup dict for custom words
 let state = loadState();
 
 function loadState() {
   try {
     const s = JSON.parse(localStorage.getItem(STORE_KEY));
-    if (s && s.cards) return s;
+    if (s && s.cards) {
+      s.custom = s.custom || {};
+      s.nextCustomId = s.nextCustomId || 1;
+      return s;
+    }
   } catch (e) { /* fall through */ }
-  return { cards: {}, streak: 0, lastDay: 0, newPerSession: 10, learnedToday: 0, todayDay: 0 };
+  return { cards: {}, custom: {}, nextCustomId: 1, streak: 0, lastDay: 0,
+           newPerSession: 10, learnedToday: 0, todayDay: 0 };
 }
 function saveState() { localStorage.setItem(STORE_KEY, JSON.stringify(state)); }
 
@@ -35,23 +41,27 @@ function todayCount() {
   return state.learnedToday;
 }
 
+// card key: number = index into WORDS, 'c<id>' = custom word
+function isCustomKey(k) { return typeof k === 'string' && k[0] === 'c'; }
+function normKey(k) { return k[0] === 'c' ? k : Number(k); }
+function wordOf(k) { return isCustomKey(k) ? state.custom[k] : WORDS[k]; }
+
 // card = [box, dueDay]
-function getCard(i) { return state.cards[i]; }
-function setCard(i, box, due) { state.cards[i] = [box, due]; }
-function gradeCard(i, ok) {
-  const c = getCard(i) || [0, 0];
+function getCard(k) { return state.cards[k]; }
+function setCard(k, box, due) { state.cards[k] = [box, due]; }
+function gradeCard(k, ok) {
+  const c = getCard(k) || [0, 0];
   let box = ok ? Math.min(c[0] + 1, MASTER_BOX) : 1;
-  setCard(i, box, dayNum() + INTERVALS[box]);
+  setCard(k, box, dayNum() + INTERVALS[box]);
   touchStreak();
   saveState();
 }
 
-function dueIndices() {
+function dueKeys() {
   const today = dayNum();
   return Object.keys(state.cards)
-    .map(Number)
-    .filter(i => state.cards[i][0] < MASTER_BOX && state.cards[i][1] <= today)
-    .sort((a, b) => a - b);
+    .map(normKey)
+    .filter(k => wordOf(k) && state.cards[k][0] < MASTER_BOX && state.cards[k][1] <= today);
 }
 function newIndices(limit) {
   const out = [];
@@ -60,12 +70,37 @@ function newIndices(limit) {
   }
   return out;
 }
+function newCustomKeys() {
+  return Object.keys(state.custom).filter(k => !state.cards[k]);
+}
 function counts() {
-  let master = 0, learning = 0;
+  let master = 0, learning = 0, cMaster = 0, cLearning = 0;
   for (const k in state.cards) {
-    if (state.cards[k][0] >= MASTER_BOX) master++; else learning++;
+    if (k[0] === 'c') {
+      if (!state.custom[k]) continue;
+      if (state.cards[k][0] >= MASTER_BOX) cMaster++; else cLearning++;
+    } else {
+      if (state.cards[k][0] >= MASTER_BOX) master++; else learning++;
+    }
   }
-  return { master, learning, unseen: WORDS.length - master - learning };
+  return { master, learning, unseen: WORDS.length - master - learning, cMaster, cLearning };
+}
+
+async function loadDict() {
+  if (!DICT) {
+    try {
+      const r = await fetch('data/dict.json');
+      DICT = r.ok ? await r.json() : {};
+    } catch (e) { DICT = {}; }
+  }
+  return DICT;
+}
+// auto-lookup a Japanese definition: base 3000 list first, then the big dict
+function lookupJa(word) {
+  const w = word.toLowerCase();
+  const base = WORDS.find(v => v.w === w);
+  if (base) return base.ja;
+  return (DICT && DICT[w]) || null;
 }
 
 /* ================= helpers ================= */
@@ -129,7 +164,8 @@ function meaningHtml(ja, expanded) {
 
 function showHome() {
   const c = counts();
-  const due = dueIndices().length;
+  const due = dueKeys().length;
+  const customTotal = Object.keys(state.custom).length;
   const pctM = (c.master / WORDS.length * 100).toFixed(1);
   const pctL = (c.learning / WORDS.length * 100).toFixed(1);
   const today = todayCount();
@@ -157,30 +193,42 @@ function showHome() {
     <button class="menu-btn" data-act="spell">
       <span>⌨️ スペル練習<span class="sub">意味と音声を聞いて英語を入力</span></span>
     </button>
+    <button class="menu-btn" data-act="mywords">
+      <span>📕 マイ単語<span class="sub">教科書の単語を自分で追加（${customTotal} 語）</span></span>
+    </button>
     <button class="menu-btn" data-act="list">
       <span>📋 単語リスト<span class="sub">3000語を検索・レベル別に確認</span></span>
     </button>`;
   $app().onclick = e => {
     const btn = e.target.closest('[data-act]');
     if (!btn) return;
-    ({ learn: startLearn, review: startReview, spell: startSpell, list: showList })[btn.dataset.act]();
+    ({ learn: startLearn, review: startReview, spell: startSpell,
+       mywords: showMyWords, list: showList })[btn.dataset.act]();
   };
 }
 
 /* ---- learn: flashcards for new words ---- */
 function startLearn() {
-  const queue = newIndices(state.newPerSession);
-  if (!queue.length) return showResult('🎉', '全部の単語を学習済みです！', 'すごい！復習を続けましょう。');
+  startLearnQueue(newIndices(state.newPerSession), '新しい単語',
+    () => showResult('🎉', '全部の単語を学習済みです！', 'すごい！復習を続けましょう。'));
+}
+function startLearnCustom() {
+  startLearnQueue(newCustomKeys(), 'マイ単語',
+    () => showResult('📕', '未学習のマイ単語はありません', '単語を追加するか、復習を続けましょう。'));
+}
+function startLearnQueue(queue, label, onEmpty) {
+  if (!queue.length) return onEmpty();
   let pos = 0;
   render();
 
   function render(flipped, expanded) {
     const i = queue[pos];
-    const w = WORDS[i];
+    const w = wordOf(i);
+    const rankLine = isCustomKey(i) ? '📕 マイ単語' : `#${i + 1}　レベル${Math.floor(i / LEVEL_SIZE) + 1}`;
     $app().innerHTML = `
-      <div class="session-head"><span>新しい単語</span><span>${pos + 1} / ${queue.length}</span></div>
+      <div class="session-head"><span>${label}</span><span>${pos + 1} / ${queue.length}</span></div>
       <div class="flashcard" data-act="${flipped ? '' : 'flip'}">
-        <div class="rank">#${i + 1}　レベル${Math.floor(i / LEVEL_SIZE) + 1}</div>
+        <div class="rank">${rankLine}</div>
         <div class="word">${esc(w.w)}</div>
         <button class="speak-btn" data-act="speak">🔊</button>
         ${flipped ? meaningHtml(w.ja, expanded) : '<div class="hint">タップして意味を表示</div>'}
@@ -215,33 +263,41 @@ function startLearn() {
 
 /* ---- review: 4-choice quiz (en -> ja) for due cards ---- */
 function startReview() {
-  const queue = shuffle(dueIndices()).slice(0, 30);
+  const queue = shuffle(dueKeys()).slice(0, 30);
   if (!queue.length) return showResult('☕', '今日の復習はありません', '「新しい単語」を進めましょう。');
   let pos = 0, correct = 0;
   render();
 
-  function choicesFor(i) {
-    const picks = new Set([i]);
-    while (picks.size < 4) {
-      // distractors from nearby frequency ranks feel fairer than random ones
-      const span = Math.min(WORDS.length, 600);
-      const base = Math.max(0, Math.min(WORDS.length - span, i - span / 2));
-      picks.add(base + Math.floor(Math.random() * span));
+  function choicesFor(key) {
+    const w = wordOf(key);
+    const texts = new Set([shortJa(w.ja)]);
+    const out = [{ txt: shortJa(w.ja), ok: true }];
+    // distractors from nearby frequency ranks feel fairer than random ones
+    const span = Math.min(WORDS.length, 600);
+    const center = isCustomKey(key) ? Math.floor(Math.random() * WORDS.length) : key;
+    const base = Math.max(0, Math.min(WORDS.length - span, center - span / 2));
+    let guard = 0;
+    while (out.length < 4 && guard++ < 200) {
+      const j = base + Math.floor(Math.random() * span);
+      const txt = shortJa(WORDS[j].ja);
+      if (WORDS[j].w === w.w || texts.has(txt)) continue;
+      texts.add(txt);
+      out.push({ txt, ok: false });
     }
-    return shuffle([...picks]);
+    return shuffle(out);
   }
 
   function render() {
-    const i = queue[pos];
-    const w = WORDS[i];
-    const choices = choicesFor(i);
+    const key = queue[pos];
+    const w = wordOf(key);
+    const choices = choicesFor(key);
     $app().innerHTML = `
       <div class="session-head"><span>復習テスト</span><span>${pos + 1} / ${queue.length}</span></div>
       <div class="quiz-q">
         <div class="word">${esc(w.w)}</div>
         <button class="speak-btn" data-act="speak">🔊</button>
       </div>
-      ${choices.map(c => `<button class="choice" data-i="${c}">${esc(shortJa(WORDS[c].ja))}</button>`).join('')}`;
+      ${choices.map((c, n) => `<button class="choice" data-n="${n}">${esc(c.txt)}</button>`).join('')}`;
     speak(w.w);
     let answered = false;
     $app().onclick = e => {
@@ -250,13 +306,12 @@ function startReview() {
       const btn = e.target.closest('.choice');
       if (!btn || answered) return;
       answered = true;
-      const picked = Number(btn.dataset.i);
-      const ok = picked === i;
+      const ok = choices[Number(btn.dataset.n)].ok;
       if (ok) correct++; else btn.classList.add('wrong');
       document.querySelectorAll('.choice').forEach(b => {
-        if (Number(b.dataset.i) === i) b.classList.add('correct');
+        if (choices[Number(b.dataset.n)].ok) b.classList.add('correct');
       });
-      gradeCard(i, ok);
+      gradeCard(key, ok);
       setTimeout(next, ok ? 700 : 1800);
     };
     function next() {
@@ -271,7 +326,7 @@ function startReview() {
 
 /* ---- spelling: ja + audio -> type the word ---- */
 function startSpell() {
-  const pool = Object.keys(state.cards).map(Number);
+  const pool = Object.keys(state.cards).map(normKey).filter(k => wordOf(k));
   if (pool.length < 4) return showResult('📖', 'まず単語を学習しよう', 'スペル練習は学習済みの単語から出題されます。');
   const queue = shuffle(pool).slice(0, 10);
   let pos = 0, correct = 0;
@@ -279,7 +334,7 @@ function startSpell() {
 
   function render() {
     const i = queue[pos];
-    const w = WORDS[i];
+    const w = wordOf(i);
     $app().innerHTML = `
       <div class="session-head"><span>スペル練習</span><span>${pos + 1} / ${queue.length}</span></div>
       <div class="quiz-q">
@@ -317,6 +372,118 @@ function startSpell() {
       if (t.dataset.act === 'check') check();
     };
   }
+}
+
+/* ---- my words: user-added textbook vocabulary ---- */
+function showMyWords(msg) {
+  const keys = Object.keys(state.custom).sort((a, b) => Number(b.slice(1)) - Number(a.slice(1)));
+  const toLearn = newCustomKeys().length;
+  function status(k) {
+    const c = getCard(k);
+    if (!c) return '⬜';
+    return c[0] >= MASTER_BOX ? '✅' : '🟡';
+  }
+  $app().innerHTML = `
+    <div class="panel">
+      <h3>📕 マイ単語（${keys.length} 語）</h3>
+      <p class="note">教科書に出てきた単語を追加できます。追加した単語は復習テスト・スペル練習にも出題されます。</p>
+      ${toLearn ? `<button class="small-btn" id="learn-custom">未学習の ${toLearn} 語を学ぶ</button>` : ''}
+    </div>
+    <div class="panel">
+      <h3>＋ 1語ずつ追加</h3>
+      <input class="search-box" id="add-w" type="text" placeholder="英単語（例: festival）"
+             autocomplete="off" autocapitalize="none" autocorrect="off" spellcheck="false">
+      <input class="search-box" id="add-ja" type="text" placeholder="意味（空のままなら自動で調べます）">
+      <button class="small-btn" id="add-one">追加</button>
+      <div class="feedback" id="add-msg">${msg ? esc(msg) : ''}</div>
+    </div>
+    <div class="panel">
+      <h3>📄 まとめて追加（教科書の1課分など）</h3>
+      <p class="note">1行に1語。意味も指定する場合は「単語,意味」のように書きます。意味を書かない単語は辞書から自動で入ります。</p>
+      <textarea id="bulk" placeholder="festival
+shrine,神社
+vacuum cleaner,掃除機"></textarea>
+      <button class="small-btn" id="add-bulk">まとめて追加</button>
+    </div>
+    <div id="custom-rows">${keys.map(k => `
+      <div class="word-row" data-k="${k}">
+        <span class="st">${status(k)}</span>
+        <span class="w">${esc(state.custom[k].w)}</span>
+        <span class="ja">${esc(shortJa(state.custom[k].ja))}</span>
+        <button class="icon-btn del-btn" data-del="${k}">🗑</button>
+      </div>`).join('')}</div>`;
+
+  const msgEl = document.getElementById('add-msg');
+  function say(text, ok) { msgEl.textContent = text; msgEl.className = 'feedback ' + (ok ? 'ok' : 'ng'); }
+
+  // returns 'added' | 'queued' (already in base list) | null
+  function addWord(raw, ja) {
+    const w = raw.trim().toLowerCase();
+    if (!w) return null;
+    const baseIdx = WORDS.findIndex(v => v.w === w);
+    if (baseIdx >= 0) {
+      // already in the 3000 — schedule it for today's review instead of duplicating
+      if (!getCard(baseIdx)) setCard(baseIdx, 1, dayNum());
+      return 'queued';
+    }
+    if (Object.values(state.custom).some(v => v.w === w)) return null;
+    ja = (ja || '').trim() || (DICT && DICT[w]) || '';
+    if (!ja) return 'noja';
+    state.custom['c' + state.nextCustomId++] = { w, ja };
+    return 'added';
+  }
+
+  document.getElementById('add-one').onclick = async () => {
+    const w = document.getElementById('add-w').value;
+    const ja = document.getElementById('add-ja').value;
+    if (!w.trim()) { say('単語を入力してください', false); return; }
+    await loadDict();
+    const r = addWord(w, ja);
+    saveState();
+    if (r === 'added') showMyWords(`「${w.trim().toLowerCase()}」を追加しました`);
+    else if (r === 'queued') showMyWords(`「${w.trim().toLowerCase()}」は3000語リストにあります。今日の復習に追加しました`);
+    else if (r === 'noja') say('辞書に見つかりません。意味を入力してから追加してください', false);
+    else say('すでに追加されています', false);
+  };
+
+  document.getElementById('add-bulk').onclick = async () => {
+    const lines = document.getElementById('bulk').value.split('\n');
+    await loadDict();
+    let added = 0, queued = 0;
+    const failed = [];
+    for (const line of lines) {
+      const m = line.split(/[,，\t]/);
+      const w = (m[0] || '').trim();
+      if (!w) continue;
+      const r = addWord(w, m.slice(1).join(','));
+      if (r === 'added') added++;
+      else if (r === 'queued') queued++;
+      else if (r === 'noja') failed.push(w);
+    }
+    saveState();
+    let text = `追加 ${added} 語`;
+    if (queued) text += `／3000語リストから今日の復習へ ${queued} 語`;
+    if (failed.length) text += `／意味が見つからず追加できず: ${failed.join(', ')}（意味を付けて再入力してください）`;
+    showMyWords(text);
+  };
+
+  if (toLearn) document.getElementById('learn-custom').onclick = startLearnCustom;
+
+  document.getElementById('custom-rows').onclick = e => {
+    const del = e.target.closest('[data-del]');
+    if (del) {
+      const k = del.dataset.del;
+      if (confirm(`「${state.custom[k].w}」を削除しますか？`)) {
+        delete state.custom[k];
+        delete state.cards[k];
+        saveState();
+        showMyWords();
+      }
+      return;
+    }
+    const row = e.target.closest('.word-row');
+    if (row) speak(state.custom[row.dataset.k].w);
+  };
 }
 
 /* ---- word list ---- */
@@ -404,8 +571,9 @@ function showSettings() {
     } catch (e) { alert('データの形式が正しくありません'); }
   };
   document.getElementById('reset').onclick = () => {
-    if (confirm('本当に学習進捗をすべて消しますか？')) {
-      state = { cards: {}, streak: 0, lastDay: 0, newPerSession: state.newPerSession, learnedToday: 0, todayDay: 0 };
+    if (confirm('本当に学習進捗をすべて消しますか？（マイ単語の単語自体は残ります）')) {
+      state = { cards: {}, custom: state.custom, nextCustomId: state.nextCustomId,
+                streak: 0, lastDay: 0, newPerSession: state.newPerSession, learnedToday: 0, todayDay: 0 };
       saveState(); showHome();
     }
   };
